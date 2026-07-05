@@ -1,0 +1,38 @@
+{
+  "title": "Observability Project Dashboard",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Requests per second by service",
+      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+      "targets": [{"expr": "sum(rate(http_requests_total[1m])) by (service)", "legendFormat": "{{service}}"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Errors per second by service",
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+      "targets": [{"expr": "sum(rate(http_requests_total{status=~\"5..|4..\"}[1m])) by (service)", "legendFormat": "{{service}}"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "P95 request latency",
+      "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
+      "targets": [{"expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, service))", "legendFormat": "{{service}}"}]
+    },
+    {
+      "type": "stat",
+      "title": "Checkout failures",
+      "gridPos": {"x": 12, "y": 8, "w": 6, "h": 8},
+      "targets": [{"expr": "sum(increase(checkout_failures_total[5m]))"}]
+    },
+    {
+      "type": "stat",
+      "title": "Payment failures",
+      "gridPos": {"x": 18, "y": 8, "w": 6, "h": 8},
+      "targets": [{"expr": "sum(increase(payment_failures_total[5m]))"}]
+    }
+  ]
+}
