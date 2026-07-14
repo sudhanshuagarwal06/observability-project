@@ -1,0 +1,76 @@
+services:
+  inventory-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: inventory
+      POSTGRES_USER: shop
+      POSTGRES_PASSWORD: shop
+    ports:
+      - "5432:5432"
+    volumes:
+      - inventory_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shop -d inventory"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  order-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: orders
+      POSTGRES_USER: shop
+      POSTGRES_PASSWORD: shop
+    ports:
+      - "5433:5432"
+    volumes:
+      - order_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shop -d orders"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  inventory-service:
+    build: ./inventory-service
+    environment:
+      SERVICE_NAME: inventory-service
+      DATABASE_URL: postgresql+psycopg://shop:shop@inventory-db:5432/inventory
+    ports:
+      - "8001:8000"
+    depends_on:
+      inventory-db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  payment-service:
+    build: ./payment-service
+    environment:
+      SERVICE_NAME: payment-service
+      PAYMENT_FAILURE_RATE: "0"
+      PAYMENT_DELAY_MS: "0"
+    ports:
+      - "8002:8000"
+    restart: unless-stopped
+
+  order-service:
+    build: ./order-service
+    environment:
+      SERVICE_NAME: order-service
+      DATABASE_URL: postgresql+psycopg://shop:shop@order-db:5432/orders
+      INVENTORY_URL: http://inventory-service:8000
+      PAYMENT_URL: http://payment-service:8000
+    ports:
+      - "8000:8000"
+    depends_on:
+      order-db:
+        condition: service_healthy
+      inventory-service:
+        condition: service_started
+      payment-service:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  inventory_data:
+  order_data:

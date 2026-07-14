@@ -1,108 +1,75 @@
-# Observability Project
+# Tiny Shop — Stage 1 v2
 
-A beginner-friendly observability lab using:
+A small FastAPI microservice application designed as the application foundation for an observability lab.
 
-- FastAPI microservices
-- Fluent Bit
-- Elasticsearch
-- Kibana
-- Prometheus
-- Grafana
+## Services
 
-## Architecture
+- **Order Service** — persists orders in PostgreSQL and orchestrates inventory reservation and payment.
+- **Inventory Service** — persists products and stock in PostgreSQL.
+- **Payment Service** — simulates successful, delayed, and failed payments.
 
-```text
-API Service + Inventory Service + Payment Service
-      | JSON container logs
-      v
-Fluent Bit -> Elasticsearch -> Kibana
+All services write structured JSON logs to stdout and expose liveness/readiness endpoints.
 
-Services expose /metrics
-      v
-Prometheus -> Grafana
-```
-
-## Run the project
+## Run
 
 ```bash
 docker compose up --build
 ```
 
-## URLs
+API documentation:
 
-- API service: http://localhost:8000
-- Inventory service: http://localhost:8001
-- Payment service: http://localhost:8002
-- Prometheus: http://localhost:9090
-- Grafana: http://localhost:3000
-- Kibana: http://localhost:5601
-- Elasticsearch: http://localhost:9200
+- Order: http://localhost:8000/docs
+- Inventory: http://localhost:8001/docs
+- Payment: http://localhost:8002/docs
 
-Grafana login:
-
-```text
-username: admin
-password: admin
-```
-
-## Generate traffic
-
-Open another terminal and run:
+## Verify
 
 ```bash
-curl http://localhost:8000/products
-curl http://localhost:8000/cart
-curl -X POST http://localhost:8000/checkout
+curl http://localhost:8001/items
+
+curl -X POST http://localhost:8000/orders \
+  -H 'Content-Type: application/json' \
+  -d '{"item_id":1,"quantity":2}'
+
+curl http://localhost:8000/orders
 ```
 
-Generate many checkout requests:
+Or run:
 
 ```bash
-for i in {1..30}; do curl -s -X POST http://localhost:8000/checkout; echo; done
+bash scripts/test-order.sh
 ```
 
-The payment service randomly fails, so you should see errors in logs and metrics.
+## Failure experiments
 
-## Prometheus queries to try
+Set in `docker-compose.yml` under `payment-service`:
 
-```promql
-sum(rate(http_requests_total[1m])) by (service)
-sum(rate(http_requests_total{status=~"5..|4.."}[1m])) by (service)
-histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, service))
-sum(increase(checkout_failures_total[5m]))
-sum(increase(payment_failures_total[5m]))
+```yaml
+PAYMENT_FAILURE_RATE: "1"
+PAYMENT_DELAY_MS: "3000"
 ```
 
-## Kibana setup
+`PAYMENT_FAILURE_RATE` is a value from `0` to `1`. Restart the payment service after changes:
 
-1. Open Kibana: http://localhost:5601
-2. Go to **Stack Management** → **Data Views**.
-3. Create a data view:
-   - Name: `observability-logs`
-   - Index pattern: `observability-logs*`
-   - Timestamp field: `@timestamp` or `time`
-4. Go to **Discover** and search logs.
-
-Useful Kibana filters:
-
-```text
-service : "api-service"
-levelname : "ERROR"
-message : "payment_failed"
-request_id : "<copy-request-id-here>"
+```bash
+docker compose up -d --build payment-service
 ```
 
-## Learning tasks
+When payment fails, the order remains in PostgreSQL with status `failed`, and the reserved inventory is released.
 
-1. Check logs in Kibana when checkout fails.
-2. Check request rate in Grafana.
-3. Check latency with the P95 panel.
-4. Compare API errors with payment-service errors.
-5. Add your own endpoint and metric.
+## Health endpoints
 
-## Possible improvements
+Every service has:
 
-- Add alert rules in Grafana.
-- Add OpenTelemetry traces later.
-- Add Kubernetes manifests.
-- Add Nginx as an entry point.
+- `/health/live` — process is alive
+- `/health/ready` — service dependencies are available
+
+## Reset databases
+
+```bash
+docker compose down -v
+```
+
+## Next stage
+
+Add Fluent Bit to collect these JSON stdout logs and fan them out to Elasticsearch and an OpenTelemetry Collector.
