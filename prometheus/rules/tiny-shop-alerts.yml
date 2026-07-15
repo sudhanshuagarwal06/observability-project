@@ -1,0 +1,74 @@
+groups:
+  - name: tiny-shop-service-alerts
+    rules:
+      - alert: TinyShopHighP95Latency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le, service) (
+              rate(tiny_shop_http_request_duration_seconds_bucket{route!="/metrics"}[2m])
+            )
+          ) > 1
+        for: 1m
+        labels:
+          severity: warning
+          team: tiny-shop
+        annotations:
+          summary: "High p95 latency on {{ $labels.service }}"
+          description: "The 95th percentile HTTP latency has exceeded 1 second for at least 1 minute."
+          runbook_url: "http://localhost:3000/d/tiny-shop-overview"
+
+      - alert: TinyShopHighHTTPErrorRate
+        expr: |
+          (
+            sum by (service) (
+              rate(tiny_shop_http_requests_total{status_code=~"5..",route!="/metrics"}[2m])
+            )
+            /
+            clamp_min(
+              sum by (service) (
+                rate(tiny_shop_http_requests_total{route!="/metrics"}[2m])
+              ),
+              0.001
+            )
+          ) > 0.05
+        for: 1m
+        labels:
+          severity: critical
+          team: tiny-shop
+        annotations:
+          summary: "High HTTP error rate on {{ $labels.service }}"
+          description: "More than 5% of requests have returned HTTP 5xx responses for at least 1 minute."
+          runbook_url: "http://localhost:3000/d/tiny-shop-overview"
+
+      - alert: TinyShopPaymentFailures
+        expr: sum(rate(tiny_shop_payments_failed_total[2m])) > 0.05
+        for: 1m
+        labels:
+          severity: critical
+          team: payments
+        annotations:
+          summary: "Payment failures are occurring"
+          description: "Payment failures exceed 0.05 failures per second for at least 1 minute."
+          runbook_url: "http://localhost:3000/d/tiny-shop-overview"
+
+      - alert: TinyShopLowInventory
+        expr: tiny_shop_inventory_stock_quantity < 5
+        for: 30s
+        labels:
+          severity: warning
+          team: inventory
+        annotations:
+          summary: "Low inventory for {{ $labels.sku }}"
+          description: "Item {{ $labels.item_id }} ({{ $labels.sku }}) has fewer than 5 units remaining."
+          runbook_url: "http://localhost:3000/d/tiny-shop-overview"
+
+      - alert: TinyShopServiceDown
+        expr: up{job=~"order-service|inventory-service|payment-service"} == 0
+        for: 30s
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "{{ $labels.job }} is unavailable"
+          description: "Prometheus has been unable to scrape {{ $labels.job }} for at least 30 seconds."

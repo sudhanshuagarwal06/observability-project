@@ -9,9 +9,35 @@ datasources:
     isDefault: true
     editable: true
 
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: true
+    jsonData:
+      derivedFields:
+        - name: TraceID
+          matcherRegex: '"trace_id"\s*:\s*"([a-f0-9]{32})"'
+          datasourceUid: jaeger
+          url: '$${__value.raw}'
+          urlDisplayLabel: 'Open trace in Jaeger'
+
   - name: Jaeger
     uid: jaeger
     type: jaeger
     access: proxy
     url: http://jaeger:16686
     editable: true
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: '-5m'
+        spanEndTimeShift: '5m'
+        tags:
+          - key: service.name
+            value: service_name
+        filterByTraceID: true
+        filterBySpanID: false
+        customQuery: true
+        query: '{service_name="$${__span.tags.service.name}"} | json | trace_id="$${__trace.traceId}"'

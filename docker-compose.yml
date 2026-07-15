@@ -69,6 +69,17 @@ services:
     depends_on:
       elasticsearch:
         condition: service_healthy
+      loki:
+        condition: service_started
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.5.3
+    command: ["-config.file=/etc/loki/config.yaml"]
+    volumes:
+      - ./loki/config.yaml:/etc/loki/config.yaml:ro
+      - loki_data:/loki
+    ports: ["3100:3100"]
     restart: unless-stopped
 
   jaeger:
@@ -173,6 +184,24 @@ services:
         fluentd-async: "true"
         tag: tiny-shop.order-service
 
+  alert-receiver:
+    build: ./alert-receiver
+    ports: ["8080:8080"]
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    ports: ["9093:9093"]
+    depends_on:
+      - alert-receiver
+    restart: unless-stopped
+
   prometheus:
     image: prom/prometheus:v3.5.0
     command:
@@ -181,12 +210,14 @@ services:
       - --web.enable-lifecycle
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
       - prometheus_data:/prometheus
     ports: ["9090:9090"]
     depends_on:
       - order-service
       - inventory-service
       - payment-service
+      - alertmanager
     restart: unless-stopped
 
   grafana:
@@ -203,6 +234,8 @@ services:
     depends_on:
       - prometheus
       - jaeger
+      - loki
+      - alertmanager
     restart: unless-stopped
 
 volumes:
@@ -210,5 +243,7 @@ volumes:
   order_data:
   elasticsearch_data:
   fluent_bit_storage:
+  loki_data:
+  alertmanager_data:
   prometheus_data:
   grafana_data:
