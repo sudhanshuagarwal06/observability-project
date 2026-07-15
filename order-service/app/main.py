@@ -10,16 +10,25 @@ from fastapi import Depends, FastAPI, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import DateTime, Numeric, String, create_engine, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+from opentelemetry import trace
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
 
 from .logging_config import configure_logging
+from .telemetry import configure_tracing
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "order-service")
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg://shop:shop@localhost:5433/orders")
 INVENTORY_URL = os.getenv("INVENTORY_URL", "http://localhost:8001")
 PAYMENT_URL = os.getenv("PAYMENT_URL", "http://localhost:8002")
+configure_tracing(SERVICE_NAME)
 logger = configure_logging(SERVICE_NAME)
+tracer = trace.get_tracer(__name__)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+SQLAlchemyInstrumentor().instrument(engine=engine)
+HTTPXClientInstrumentor().instrument()
 
 
 class Base(DeclarativeBase):
@@ -83,7 +92,8 @@ async def lifespan(app: FastAPI):
     await app.state.http_client.aclose()
 
 
-app = FastAPI(title="Order Service", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="Order Service", version="1.2.0", lifespan=lifespan)
+FastAPIInstrumentor.instrument_app(app)
 
 
 @app.get("/health/live")
@@ -123,10 +133,14 @@ def get_order(order_id: str, db: Session = Depends(get_db)):
 @app.post("/orders", response_model=OrderRead, status_code=status.HTTP_201_CREATED)
 async def create_order(payload: OrderCreate, request: Request, db: Session = Depends(get_db)):
     client: httpx.AsyncClient = request.app.state.http_client
-    try:
-        item_response = await client.get(f"{INVENTORY_URL}/items/{payload.item_id}")
-    except httpx.RequestError as exc:
-        raise HTTPException(status_code=503, detail="Inventory service unavailable") from exc
+    with tracer.start_as_current_span("order.lookup_inventory") as span:
+        span.set_attribute("item.id", payload.item_id)
+        span.set_attribute("order.quantity", payload.quantity)
+        try:
+            item_response = await client.get(f"{INVENTORY_URL}/items/{payload.item_id}")
+        except httpx.RequestError as exc:
+            span.record_exception(exc)
+            raise HTTPException(status_code=503, detail="Inventory service unavailable") from exc
     if item_response.status_code == 404:
         raise HTTPException(status_code=404, detail="Item not found")
     if item_response.status_code != 200:
@@ -142,6 +156,7 @@ async def create_order(payload: OrderCreate, request: Request, db: Session = Dep
     db.add(order)
     db.commit()
     db.refresh(order)
+    trace.get_current_span().set_attribute("order.id", order.id)
     logger.info("Order created", extra={"order_id": order.id, "item_id": order.item_id, "quantity": order.quantity, "status": order.status})
 
     reserved = False

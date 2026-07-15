@@ -5,10 +5,8 @@ services:
       POSTGRES_DB: inventory
       POSTGRES_USER: shop
       POSTGRES_PASSWORD: shop
-    ports:
-      - "5432:5432"
-    volumes:
-      - inventory_data:/var/lib/postgresql/data
+    ports: ["5432:5432"]
+    volumes: ["inventory_data:/var/lib/postgresql/data"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U shop -d inventory"]
       interval: 5s
@@ -21,47 +19,141 @@ services:
       POSTGRES_DB: orders
       POSTGRES_USER: shop
       POSTGRES_PASSWORD: shop
-    ports:
-      - "5433:5432"
-    volumes:
-      - order_data:/var/lib/postgresql/data
+    ports: ["5433:5432"]
+    volumes: ["order_data:/var/lib/postgresql/data"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U shop -d orders"]
       interval: 5s
       timeout: 3s
       retries: 15
 
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.19.0
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      xpack.security.enrollment.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    ports: ["9200:9200"]
+    volumes: ["elasticsearch_data:/usr/share/elasticsearch/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.19.0
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+      XPACK_SECURITY_ENABLED: "false"
+      SERVER_HOST: 0.0.0.0
+    ports: ["5601:5601"]
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    restart: unless-stopped
+
+  fluent-bit:
+    image: fluent/fluent-bit:3.2.10
+    command: ["/fluent-bit/bin/fluent-bit", "-c", "/fluent-bit/etc/fluent-bit.conf"]
+    volumes:
+      - ./fluent-bit/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - ./fluent-bit/parsers.conf:/fluent-bit/etc/parsers.conf:ro
+      - fluent_bit_storage:/fluent-bit/storage
+    ports:
+      - "24224:24224"
+      - "24224:24224/udp"
+      - "2020:2020"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.76.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.136.0
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./otel-collector/config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "13133:13133"
+    depends_on:
+      jaeger:
+        condition: service_started
+    restart: unless-stopped
+
   inventory-service:
     build: ./inventory-service
     environment:
       SERVICE_NAME: inventory-service
+      SERVICE_VERSION: "1.2.0"
+      DEPLOYMENT_ENVIRONMENT: development
       DATABASE_URL: postgresql+psycopg://shop:shop@inventory-db:5432/inventory
-    ports:
-      - "8001:8000"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_INSECURE: "true"
+    ports: ["8001:8000"]
     depends_on:
       inventory-db:
         condition: service_healthy
+      fluent-bit:
+        condition: service_started
+      otel-collector:
+        condition: service_started
     restart: unless-stopped
+    logging:
+      driver: fluentd
+      options:
+        fluentd-address: localhost:24224
+        fluentd-async: "true"
+        tag: tiny-shop.inventory-service
 
   payment-service:
     build: ./payment-service
     environment:
       SERVICE_NAME: payment-service
+      SERVICE_VERSION: "1.2.0"
+      DEPLOYMENT_ENVIRONMENT: development
       PAYMENT_FAILURE_RATE: "0"
       PAYMENT_DELAY_MS: "0"
-    ports:
-      - "8002:8000"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_INSECURE: "true"
+    ports: ["8002:8000"]
+    depends_on:
+      fluent-bit:
+        condition: service_started
+      otel-collector:
+        condition: service_started
     restart: unless-stopped
+    logging:
+      driver: fluentd
+      options:
+        fluentd-address: localhost:24224
+        fluentd-async: "true"
+        tag: tiny-shop.payment-service
 
   order-service:
     build: ./order-service
     environment:
       SERVICE_NAME: order-service
+      SERVICE_VERSION: "1.2.0"
+      DEPLOYMENT_ENVIRONMENT: development
       DATABASE_URL: postgresql+psycopg://shop:shop@order-db:5432/orders
       INVENTORY_URL: http://inventory-service:8000
       PAYMENT_URL: http://payment-service:8000
-    ports:
-      - "8000:8000"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_INSECURE: "true"
+    ports: ["8000:8000"]
     depends_on:
       order-db:
         condition: service_healthy
@@ -69,8 +161,20 @@ services:
         condition: service_started
       payment-service:
         condition: service_started
+      fluent-bit:
+        condition: service_started
+      otel-collector:
+        condition: service_started
     restart: unless-stopped
+    logging:
+      driver: fluentd
+      options:
+        fluentd-address: localhost:24224
+        fluentd-async: "true"
+        tag: tiny-shop.order-service
 
 volumes:
   inventory_data:
   order_data:
+  elasticsearch_data:
+  fluent_bit_storage:

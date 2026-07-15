@@ -6,14 +6,20 @@ from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+from opentelemetry import trace
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from .logging_config import configure_logging
+from .telemetry import configure_tracing
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "payment-service")
 FAILURE_RATE = float(os.getenv("PAYMENT_FAILURE_RATE", "0"))
 DELAY_MS = int(os.getenv("PAYMENT_DELAY_MS", "0"))
+configure_tracing(SERVICE_NAME)
 logger = configure_logging(SERVICE_NAME)
-app = FastAPI(title="Payment Service", version="1.1.0")
+tracer = trace.get_tracer(__name__)
+app = FastAPI(title="Payment Service", version="1.2.0")
+FastAPIInstrumentor.instrument_app(app)
 
 
 class PaymentRequest(BaseModel):
@@ -40,6 +46,9 @@ def ready():
 
 @app.post("/payments", response_model=PaymentResponse)
 async def create_payment(payload: PaymentRequest):
+    span = trace.get_current_span()
+    span.set_attribute("order.id", payload.order_id)
+    span.set_attribute("payment.amount", float(payload.amount))
     if DELAY_MS > 0:
         await asyncio.sleep(DELAY_MS / 1000)
     if random.random() < FAILURE_RATE:

@@ -8,14 +8,21 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import DateTime, Numeric, String, create_engine, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+from opentelemetry import trace
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
 
 from .logging_config import configure_logging
+from .telemetry import configure_tracing
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "inventory-service")
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg://shop:shop@localhost:5432/inventory")
+configure_tracing(SERVICE_NAME)
 logger = configure_logging(SERVICE_NAME)
+tracer = trace.get_tracer(__name__)
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+SQLAlchemyInstrumentor().instrument(engine=engine)
 
 
 class Base(DeclarativeBase):
@@ -83,7 +90,8 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="Inventory Service", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="Inventory Service", version="1.2.0", lifespan=lifespan)
+FastAPIInstrumentor.instrument_app(app)
 
 
 @app.get("/health/live")
@@ -129,6 +137,9 @@ def create_item(payload: ItemCreate, db: Session = Depends(get_db)):
 
 @app.post("/items/{item_id}/reserve", response_model=ItemRead)
 def reserve_stock(item_id: int, payload: StockChange, db: Session = Depends(get_db)):
+    span = trace.get_current_span()
+    span.set_attribute("item.id", item_id)
+    span.set_attribute("inventory.reserve.quantity", payload.quantity)
     item = db.scalar(select(InventoryItem).where(InventoryItem.id == item_id).with_for_update())
     if item is None:
         raise HTTPException(status_code=404, detail="Item not found")

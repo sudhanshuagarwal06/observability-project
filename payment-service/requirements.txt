@@ -1,3 +1,8 @@
 fastapi==0.116.1
 uvicorn[standard]==0.35.0
 pydantic==2.11.7
+opentelemetry-api>=1.30,<2
+opentelemetry-sdk>=1.30,<2
+opentelemetry-exporter-otlp-proto-grpc>=1.30,<2
+opentelemetry-instrumentation-fastapi>=0.51b0,<1
+opentelemetry-instrumentation-httpx>=0.51b0,<1
