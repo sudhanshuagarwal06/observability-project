@@ -13,6 +13,13 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
 
 from .logging_config import configure_logging
+from .metrics import (
+    INVENTORY_RELEASES,
+    INVENTORY_RESERVATION_FAILURES,
+    INVENTORY_RESERVATIONS,
+    INVENTORY_STOCK,
+    setup_metrics,
+)
 from .telemetry import configure_tracing
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "inventory-service")
@@ -80,6 +87,8 @@ def seed_inventory() -> None:
             InventoryItem(sku="KEYBOARD-001", name="Mechanical Keyboard", price=Decimal("129.00"), quantity=50),
         ])
         db.commit()
+        for item in db.scalars(select(InventoryItem)).all():
+            INVENTORY_STOCK.labels(item_id=str(item.id), sku=item.sku).set(item.quantity)
         logger.info("Seeded inventory database")
 
 
@@ -87,11 +96,15 @@ def seed_inventory() -> None:
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(engine)
     seed_inventory()
+    with SessionLocal() as db:
+        for item in db.scalars(select(InventoryItem)).all():
+            INVENTORY_STOCK.labels(item_id=str(item.id), sku=item.sku).set(item.quantity)
     yield
 
 
 app = FastAPI(title="Inventory Service", version="1.2.0", lifespan=lifespan)
 FastAPIInstrumentor.instrument_app(app)
+setup_metrics(app, SERVICE_NAME)
 
 
 @app.get("/health/live")
@@ -131,6 +144,7 @@ def create_item(payload: ItemCreate, db: Session = Depends(get_db)):
         db.rollback()
         raise HTTPException(status_code=409, detail="SKU already exists") from exc
     db.refresh(item)
+    INVENTORY_STOCK.labels(item_id=str(item.id), sku=item.sku).set(item.quantity)
     logger.info("Inventory item created", extra={"item_id": item.id, "quantity": item.quantity})
     return item
 
@@ -142,12 +156,16 @@ def reserve_stock(item_id: int, payload: StockChange, db: Session = Depends(get_
     span.set_attribute("inventory.reserve.quantity", payload.quantity)
     item = db.scalar(select(InventoryItem).where(InventoryItem.id == item_id).with_for_update())
     if item is None:
+        INVENTORY_RESERVATION_FAILURES.labels(reason="not_found").inc()
         raise HTTPException(status_code=404, detail="Item not found")
     if item.quantity < payload.quantity:
+        INVENTORY_RESERVATION_FAILURES.labels(reason="insufficient_stock").inc()
         raise HTTPException(status_code=409, detail="Insufficient inventory")
     item.quantity -= payload.quantity
     db.commit()
     db.refresh(item)
+    INVENTORY_RESERVATIONS.inc()
+    INVENTORY_STOCK.labels(item_id=str(item.id), sku=item.sku).set(item.quantity)
     logger.info("Inventory reserved", extra={"item_id": item.id, "quantity": payload.quantity, "status": "reserved"})
     return item
 
@@ -160,5 +178,7 @@ def release_stock(item_id: int, payload: StockChange, db: Session = Depends(get_
     item.quantity += payload.quantity
     db.commit()
     db.refresh(item)
+    INVENTORY_RELEASES.inc()
+    INVENTORY_STOCK.labels(item_id=str(item.id), sku=item.sku).set(item.quantity)
     logger.info("Inventory released", extra={"item_id": item.id, "quantity": payload.quantity, "status": "released"})
     return item

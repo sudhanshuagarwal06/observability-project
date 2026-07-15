@@ -16,6 +16,7 @@ from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
 
 from .logging_config import configure_logging
+from .metrics import ORDERS_CONFIRMED, ORDERS_CREATED, ORDERS_FAILED, setup_metrics
 from .telemetry import configure_tracing
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "order-service")
@@ -94,6 +95,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Order Service", version="1.2.0", lifespan=lifespan)
 FastAPIInstrumentor.instrument_app(app)
+setup_metrics(app, SERVICE_NAME)
 
 
 @app.get("/health/live")
@@ -156,6 +158,7 @@ async def create_order(payload: OrderCreate, request: Request, db: Session = Dep
     db.add(order)
     db.commit()
     db.refresh(order)
+    ORDERS_CREATED.inc()
     trace.get_current_span().set_attribute("order.id", order.id)
     logger.info("Order created", extra={"order_id": order.id, "item_id": order.item_id, "quantity": order.quantity, "status": order.status})
 
@@ -178,12 +181,14 @@ async def create_order(payload: OrderCreate, request: Request, db: Session = Dep
         order.payment_id = payment["payment_id"]
         db.commit()
         db.refresh(order)
+        ORDERS_CONFIRMED.inc()
         logger.info("Order confirmed", extra={"order_id": order.id, "item_id": order.item_id, "quantity": order.quantity, "payment_id": order.payment_id, "status": order.status})
         return order
     except HTTPException as exc:
         order.status = OrderStatus.failed.value
         order.failure_reason = str(exc.detail)
         db.commit()
+        ORDERS_FAILED.labels(reason="business_error").inc()
         if reserved:
             try:
                 await client.post(f"{INVENTORY_URL}/items/{payload.item_id}/release", json={"quantity": payload.quantity})
@@ -195,6 +200,7 @@ async def create_order(payload: OrderCreate, request: Request, db: Session = Dep
         order.status = OrderStatus.failed.value
         order.failure_reason = f"Downstream service failure: {type(exc).__name__}"
         db.commit()
+        ORDERS_FAILED.labels(reason="downstream_failure").inc()
         if reserved:
             try:
                 release_response = await client.post(f"{INVENTORY_URL}/items/{payload.item_id}/release", json={"quantity": payload.quantity})

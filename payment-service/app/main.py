@@ -1,6 +1,7 @@
 import asyncio
 import os
 import random
+import time
 from decimal import Decimal
 from uuid import uuid4
 
@@ -10,6 +11,7 @@ from opentelemetry import trace
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from .logging_config import configure_logging
+from .metrics import PAYMENT_PROCESSING, PAYMENTS_FAILED, PAYMENTS_SUCCEEDED, setup_metrics
 from .telemetry import configure_tracing
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "payment-service")
@@ -20,6 +22,7 @@ logger = configure_logging(SERVICE_NAME)
 tracer = trace.get_tracer(__name__)
 app = FastAPI(title="Payment Service", version="1.2.0")
 FastAPIInstrumentor.instrument_app(app)
+setup_metrics(app, SERVICE_NAME)
 
 
 class PaymentRequest(BaseModel):
@@ -46,14 +49,19 @@ def ready():
 
 @app.post("/payments", response_model=PaymentResponse)
 async def create_payment(payload: PaymentRequest):
+    started = time.perf_counter()
     span = trace.get_current_span()
     span.set_attribute("order.id", payload.order_id)
     span.set_attribute("payment.amount", float(payload.amount))
     if DELAY_MS > 0:
         await asyncio.sleep(DELAY_MS / 1000)
     if random.random() < FAILURE_RATE:
+        PAYMENTS_FAILED.labels(reason="simulated_failure").inc()
+        PAYMENT_PROCESSING.observe(time.perf_counter() - started)
         logger.error("Payment rejected", extra={"order_id": payload.order_id, "status": "failed", "error_type": "SimulatedPaymentFailure"})
         raise HTTPException(status_code=503, detail="Simulated payment failure")
     payment_id = str(uuid4())
+    PAYMENTS_SUCCEEDED.inc()
+    PAYMENT_PROCESSING.observe(time.perf_counter() - started)
     logger.info("Payment completed", extra={"order_id": payload.order_id, "payment_id": payment_id, "status": "completed"})
     return PaymentResponse(payment_id=payment_id, order_id=payload.order_id, amount=payload.amount, status="completed")
